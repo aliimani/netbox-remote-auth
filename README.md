@@ -4,7 +4,7 @@ This project provides a custom authentication backend for NetBox that allows you
 
 Unlike NetBox’s built-in “RemoteUser” header-based authentication, this backend communicates directly with your TACACS+/RADIUS servers and maps the user’s AAA-assigned *role* to *NetBox groups* automatically.
 
-The goal of this project is to make remote authentication work cleanly without needing reverse proxies, SSO, or custom HTTP headers — just talk to your TACACS or RADIUS server, receive the user’s role, and assign them to the correct NetBox groups.
+The goal of this project is to make remote authentication work cleanly without needing reverse proxies, SSO, or custom HTTP headers, just talk to your TACACS or RADIUS server, receive the user’s role, and assign them to the correct NetBox groups.
 
 ---
 
@@ -40,8 +40,8 @@ This makes it possible to centrally manage NetBox permissions using your TACACS+
 
 ## Features
 
-✔ Supports TACACS+ (ISE, ACS, FreeTACACS)  
-✔ Supports RADIUS (ISE, FreeRADIUS, Windows NPS)  
+✔ Supports TACACS+
+✔ Supports RADIUS
 ✔ Multi-server failover support  
 ✔ Automatic group creation based on AAA “role” attribute  
 ✔ Optional default groups  
@@ -58,7 +58,6 @@ Add the following Python packages to your NetBox environment:
 ```
 tacacs-plus
 pyrad
-typing_extensions
 ```
 
 ---
@@ -165,11 +164,12 @@ This group will be added to *every* remote user.
 REMOTE_AUTH_SUPERUSER_GROUPS = ['netbox-admin']
 REMOTE_AUTH_STAFF_GROUPS = ['netbox-staff']
 ```
+A mapping of permissions to assign a new user account when created using remote authentication.
 
 Meaning:
 
-- If a user is in group `netbox-admin` → they become `is_superuser = True`
-- If a user is in group `netbox-staff` → they become `is_staff = True`
+- If a user is in group `netbox-admin` → they become `is_superuser = True` in NetBox
+- If a user is in group `netbox-staff` → they become `is_staff = True` in NetBox
 
 ---
 
