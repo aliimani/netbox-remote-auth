@@ -58,6 +58,7 @@ Add the following Python packages to your NetBox environment:
 ```
 tacacs-plus
 pyrad
+typing_extensions
 ```
 
 ---
