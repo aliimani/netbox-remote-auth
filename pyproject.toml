@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-remote-auth"
+version = "0.1.0"
+description = "TACACS+ / RADIUS remote authentication backend for NetBox"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Ali Imani" }
+]
+dependencies = [
+  "tacacs-plus",
+  "pyrad",
+]
+
+license = { text = "MIT" }
+
+[project.urls]
+Homepage = "https://github.com/aliimani/netbox-remote-auth"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["netboxauth"]
