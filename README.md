@@ -17,7 +17,7 @@ The backend works for both:
 2. [Features](#features)  
 3. [Requirements](#requirements)  
 4. [Installation](#installation)  
-5. [`netboxauth_config.py` – Configuration](#netboxauth_configpy--configuration)  
+5. [netboxauth_config.py – Configuration](#netboxauth_configpy--configuration)  
 6. [NetBox Docker Instructions](#netbox-docker-instructions)  
 7. [Bare-Metal NetBox Instructions](#bare-metal-netbox-instructions)  
 8. [AAA Server Configuration](#aaa-server-configuration)  
