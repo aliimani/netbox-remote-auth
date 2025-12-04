@@ -137,7 +137,7 @@ git clone https://github.com/aliimani/netbox-remote-auth.git
 ```bash
 cd netbox-remote-auth
 source /opt/netbox/venv/bin/activate
-uv pip install .
+pip install .
 deactivate
 ```
 
