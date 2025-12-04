@@ -148,11 +148,15 @@ class NetBoxRemoteAuthBackend(BaseBackend):
 
     Behaviour:
       - Authenticates against TACACS+ / RADIUS.
+      - Supports multiple servers for failover.
       - Creates/updates users & groups.
       - Sets is_staff / is_superuser based on groups.
-      - Always relies on AAA accept/deny to decide login.
       - On success, ensures user.is_active = True.
-      - Optionally syncs first_name, last_name, email from attributes.
+      - Optionally syncs first_name, last_name, email from AAA attributes
+        using the standard NetBox config keys:
+          * REMOTE_AUTH_USER_FIRST_NAME
+          * REMOTE_AUTH_USER_LAST_NAME
+          * REMOTE_AUTH_USER_EMAIL
     """
 
     # ------------------------------------------------------------------
@@ -510,14 +514,17 @@ class NetBoxRemoteAuthBackend(BaseBackend):
 
         # Reset flags then re-apply based on groups
         user.is_superuser = False
-        user.is_staff = user.is_staff  # keep staff if something else sets it
+        # keep existing staff if some other mechanism sets it, then OR with mapping
+        staff_flag = user.is_staff
 
         if names & super_groups:
             user.is_superuser = True
-            user.is_staff = True
+            staff_flag = True
 
         if names & staff_groups:
-            user.is_staff = True
+            staff_flag = True
+
+        user.is_staff = staff_flag
 
         # On successful remote auth, ensure the account is active
         user.is_active = True
@@ -576,10 +583,12 @@ class NetBoxRemoteAuthBackend(BaseBackend):
         """
         Optionally set first_name, last_name, and email from TACACS+/RADIUS attrs.
 
-        Configurable via:
-          NETBOX_REMOTE_AUTH_FIRST_NAME_ATTR  (e.g. 'givenName')
-          NETBOX_REMOTE_AUTH_LAST_NAME_ATTR   (e.g. 'sn')
-          NETBOX_REMOTE_AUTH_EMAIL_ATTR       (e.g. 'mail')
+        Uses the standard NetBox remote-auth config keys, but instead of
+        HTTP headers we interpret them as AAA attribute names:
+
+          REMOTE_AUTH_USER_FIRST_NAME  -> attribute name for first name
+          REMOTE_AUTH_USER_LAST_NAME   -> attribute name for last name
+          REMOTE_AUTH_USER_EMAIL       -> attribute name for email
         """
         if not attrs:
             return
@@ -594,9 +603,9 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                 value = value[0]
             return str(value).strip()
 
-        first_attr = _cfg("NETBOX_REMOTE_AUTH_FIRST_NAME_ATTR", None)
-        last_attr = _cfg("NETBOX_REMOTE_AUTH_LAST_NAME_ATTR", None)
-        email_attr = _cfg("NETBOX_REMOTE_AUTH_EMAIL_ATTR", None)
+        first_attr = _cfg("REMOTE_AUTH_USER_FIRST_NAME", None)
+        last_attr = _cfg("REMOTE_AUTH_USER_LAST_NAME", None)
+        email_attr = _cfg("REMOTE_AUTH_USER_EMAIL", None)
 
         first = _get_attr(first_attr)
         last = _get_attr(last_attr)
