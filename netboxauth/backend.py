@@ -1,16 +1,12 @@
-# netboxauth/backend.py
-
 from __future__ import annotations
 
 from typing import Optional, Dict, Any, List, Tuple
-import socket
 import logging
+import socket
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.backends import BaseBackend
-
-from tacacs_plus.client import TACACSClient
 
 logger = logging.getLogger(__name__)
 
@@ -20,13 +16,61 @@ GroupModel = User._meta.get_field("groups").remote_field.model
 
 
 # ----------------------------------------------------------------------
-# Helpers
+# Configuration loading (Docker + bare-metal)
+# ----------------------------------------------------------------------
+
+# 1) netbox-docker & modern NetBox:
+#    /etc/netbox/config/*.py are aggregated into netbox.configuration
+try:
+    from netbox import configuration as netbox_config  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - bare-metal or old versions
+    netbox_config = None
+
+# 2) Optional standalone config module for bare-metal installs:
+#    netboxauth_config.py next to configuration.py (must be on PYTHONPATH)
+try:
+    import netboxauth_config as netboxauth_cfg  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - module not found
+    netboxauth_cfg = None
+
+
+def _cfg(name: str, default: Any = None) -> Any:
+    """
+    Read a setting for the backend.
+
+    Priority:
+      1. netbox.configuration  (docker-style aggregated config)
+      2. django.conf.settings  (bare-metal / older setups)
+      3. netboxauth_config     (local module for bare-metal)
+      4. default
+    """
+    # 1) netbox.configuration aggregator (docker)
+    if netbox_config is not None:
+        try:
+            return getattr(netbox_config, name)
+        except AttributeError:
+            pass
+
+    # 2) Direct Django settings
+    if hasattr(settings, name):
+        return getattr(settings, name)
+
+    # 3) Standalone netboxauth_config.py (bare-metal)
+    if netboxauth_cfg is not None and hasattr(netboxauth_cfg, name):
+        return getattr(netboxauth_cfg, name)
+
+    # 4) Fallback
+    return default
+
+
+# ----------------------------------------------------------------------
+# Utility helpers
 # ----------------------------------------------------------------------
 
 
-def get_server_list(cfg: dict, default_port: int) -> List[Tuple[str, int]]:
+def get_server_list(cfg: Dict[str, Any], default_port: int) -> List[Tuple[str, int]]:
     """
-    Get a list of (host, port) tuples from config dict.
+    Return list of (host, port) tuples for failover.
 
     Supports:
       cfg["SERVERS"] = [{"HOST": "...", "PORT": 49}, ...]
@@ -36,6 +80,7 @@ def get_server_list(cfg: dict, default_port: int) -> List[Tuple[str, int]]:
     """
     if not cfg:
         return []
+
     servers = cfg.get("SERVERS")
     if servers:
         out: List[Tuple[str, int]] = []
@@ -45,15 +90,17 @@ def get_server_list(cfg: dict, default_port: int) -> List[Tuple[str, int]]:
                 continue
             out.append((host, int(s.get("PORT", default_port))))
         return out
+
     host = cfg.get("HOST")
     if host:
         return [(host, int(cfg.get("PORT", default_port)))]
+
     return []
 
 
 def parse_kv_arguments(args: List[Any]) -> Dict[str, Any]:
     """
-    Parse TACACS AVPairs list into a dict.
+    Turn TACACS AVPairs list into a dict.
 
     Example:
       [b'role=netbox-admin', b'priv-lvl=15']
@@ -89,37 +136,23 @@ def parse_kv_arguments(args: List[Any]) -> Dict[str, Any]:
 
 
 # ----------------------------------------------------------------------
-# Main backend
+# Main Backend
 # ----------------------------------------------------------------------
 
 
 class NetBoxRemoteAuthBackend(BaseBackend):
     """
-    NetBox authentication backend using TACACS+ or RADIUS (Cisco ISE).
+    NetBox authentication backend using TACACS+ or RADIUS (e.g. Cisco ISE).
+
+    Works in both netbox-docker and bare-metal NetBox installs.
 
     Behaviour:
-
-      - Selects method by NETBOX_REMOTE_AUTH_METHOD: "tacacs" or "radius"
-
-      - NETBOX_REMOTE_AUTH_TACACS / NETBOX_REMOTE_AUTH_RADIUS settings:
-          * SERVERS / HOST / PORT
-          * SECRET
-          * TIMEOUT
-
-      - Global NetBox REMOTE_AUTH_* settings:
-          * REMOTE_AUTH_AUTO_CREATE_USER (bool)
-          * REMOTE_AUTH_DEFAULT_GROUPS (list of group names)
-          * REMOTE_AUTH_GROUP_SYNC_ENABLED (bool)
-          * REMOTE_AUTH_SUPERUSER_GROUPS (list of group names)
-          * REMOTE_AUTH_STAFF_GROUPS (list of group names)
-
-      - Group model:
-
-          * Every remote "role" is treated as a NetBox group name.
-            Example: ISE sends role=netbox-admin -> group "netbox-admin"
-
-          * REMOTE_AUTH_DEFAULT_GROUPS are always added
-          * No NETBOX_REMOTE_AUTH_GROUP_MAP is used in this version
+      - Authenticates against TACACS+ / RADIUS.
+      - Creates/updates users & groups.
+      - Sets is_staff / is_superuser based on groups.
+      - Always relies on AAA accept/deny to decide login.
+      - On success, ensures user.is_active = True.
+      - Optionally syncs first_name, last_name, email from attributes.
     """
 
     # ------------------------------------------------------------------
@@ -136,8 +169,18 @@ class NetBoxRemoteAuthBackend(BaseBackend):
         if not username or not password:
             return None
 
-        method = getattr(settings, "NETBOX_REMOTE_AUTH_METHOD", None)
+        # Check that remote auth is globally enabled
+        if not bool(_cfg("REMOTE_AUTH_ENABLED", False)):
+            return None
+
+        method = _cfg("NETBOX_REMOTE_AUTH_METHOD", None)
+        if not method:
+            logger.debug("NETBOX_REMOTE_AUTH_METHOD not set; backend inactive.")
+            return None
+
+        method = str(method).lower()
         if method not in {"tacacs", "radius"}:
+            logger.warning("Unsupported NETBOX_REMOTE_AUTH_METHOD: %r", method)
             return None
 
         if method == "tacacs":
@@ -146,6 +189,7 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             result = self._authenticate_radius(username, password)
 
         if not result.get("success"):
+            # AAA rejected (wrong password, no policy, etc.)
             return None
 
         return self._get_or_create_user(username, password, result, method)
@@ -157,17 +201,27 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             return None
 
     # ------------------------------------------------------------------
-    # TACACS+ auth
+    # TACACS+ Authentication
     # ------------------------------------------------------------------
 
     def _authenticate_tacacs(self, username: str, password: str) -> Dict[str, Any]:
-        cfg = getattr(settings, "NETBOX_REMOTE_AUTH_TACACS", {}) or {}
+        cfg = _cfg("NETBOX_REMOTE_AUTH_TACACS", {}) or {}
 
         servers = get_server_list(cfg, 49)
         secret = cfg.get("SECRET")
         timeout = int(cfg.get("TIMEOUT", 5))
 
         if not servers or not secret:
+            logger.warning("TACACS config incomplete or missing servers/secret.")
+            return {"success": False, "attributes": {}, "remote_roles": []}
+
+        try:
+            from tacacs_plus.client import TACACSClient
+        except ImportError:  # pragma: no cover - dependency missing
+            logger.error(
+                "tacacs-plus package is not installed; "
+                "TACACS+ authentication is unavailable."
+            )
             return {"success": False, "attributes": {}, "remote_roles": []}
 
         for host, port in servers:
@@ -188,9 +242,10 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                 )
 
                 if not getattr(auth_result, "valid", False):
+                    # Authentication failed on this server; try next
                     continue
 
-                # Authorization to get AVPairs (role, priv-lvl, etc.)
+                # Authorization to fetch AVPairs (role, priv-lvl, etc.)
                 try:
                     author = client.authorize(
                         username=username,
@@ -198,15 +253,26 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                         rem_addr="netbox",
                         port="https",
                     )
-                    attributes = parse_kv_arguments(getattr(author, "arguments", []))
-                except Exception:
+                    attributes = parse_kv_arguments(
+                        getattr(author, "arguments", [])
+                    )
+                except Exception as exc:  # pragma: no cover - very defensive
+                    logger.warning(
+                        "TACACS authorization failed for %s on %s:%s: %s",
+                        username,
+                        host,
+                        port,
+                        exc,
+                    )
                     attributes = {}
 
                 remote_roles = self._extract_remote_roles_tacacs(attributes)
 
                 logger.debug(
-                    "TACACS: attributes for %s: %r; remote_roles=%r",
+                    "TACACS: attributes for %s via %s:%s: %r; remote_roles=%r",
                     username,
+                    host,
+                    port,
                     attributes,
                     remote_roles,
                 )
@@ -217,14 +283,28 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                     "remote_roles": remote_roles,
                 }
 
-            except Exception:
+            except Exception as exc:  # pragma: no cover - network / TACACS errors
+                logger.warning(
+                    "Error talking to TACACS server %s:%s for user %s: %s",
+                    host,
+                    port,
+                    username,
+                    exc,
+                )
                 continue
 
         return {"success": False, "attributes": {}, "remote_roles": []}
 
     @staticmethod
     def _extract_remote_roles_tacacs(attrs: Dict[str, Any]) -> List[str]:
-        """Return a list of role strings from TACACS attributes."""
+        """
+        Extract roles from TACACS attributes (Cisco ISE, etc.).
+
+        Supported patterns:
+          - role=netbox-admin
+          - Cisco-AVPair: shell:role="netbox-admin"
+          - priv-lvl -> pseudo-role tacacs-priv-<N>
+        """
         roles: List[str] = []
         if not attrs:
             return roles
@@ -245,15 +325,17 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             for item in values:
                 s = str(item)
                 if "shell:role=" in s:
-                    roles.append(s.split("=", 1)[1].replace('"', ""))
+                    roles.append(
+                        s.split("=", 1)[1].replace('"', "").strip()
+                    )
 
         # 3) priv-lvl as pseudo-role
         if "priv-lvl" in attrs:
             roles.append(f"tacacs-priv-{attrs['priv-lvl']}")
 
         # dedupe
-        out: List[str] = []
         seen = set()
+        out: List[str] = []
         for r in roles:
             if r not in seen:
                 seen.add(r)
@@ -261,23 +343,29 @@ class NetBoxRemoteAuthBackend(BaseBackend):
         return out
 
     # ------------------------------------------------------------------
-    # RADIUS auth
+    # RADIUS Authentication
     # ------------------------------------------------------------------
 
     def _authenticate_radius(self, username: str, password: str) -> Dict[str, Any]:
-        cfg = getattr(settings, "NETBOX_REMOTE_AUTH_RADIUS", {}) or {}
+        cfg = _cfg("NETBOX_REMOTE_AUTH_RADIUS", {}) or {}
+
         servers = get_server_list(cfg, 1812)
         secret = cfg.get("SECRET")
         timeout = int(cfg.get("TIMEOUT", 5))
         nas_id = cfg.get("NAS_IDENTIFIER", "netbox")
 
         if not servers or not secret:
+            logger.warning("RADIUS config incomplete or missing servers/secret.")
             return {"success": False, "attributes": {}, "remote_roles": []}
 
         try:
             from pyrad.client import Client
             import pyrad.packet as packet
-        except Exception:
+        except ImportError:  # pragma: no cover - dependency missing
+            logger.error(
+                "pyrad package is not installed; "
+                "RADIUS authentication is unavailable."
+            )
             return {"success": False, "attributes": {}, "remote_roles": []}
 
         for host, port in servers:
@@ -293,6 +381,7 @@ class NetBoxRemoteAuthBackend(BaseBackend):
 
                 reply = client.SendPacket(req)
                 if reply.code != packet.AccessAccept:
+                    # Authentication failed on this server; try the next
                     continue
 
                 attributes: Dict[str, Any] = {}
@@ -303,8 +392,10 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                 remote_roles = self._extract_remote_roles_radius(attributes)
 
                 logger.debug(
-                    "RADIUS: attributes for %s: %r; remote_roles=%r",
+                    "RADIUS: attributes for %s via %s:%s: %r; remote_roles=%r",
                     username,
+                    host,
+                    port,
                     attributes,
                     remote_roles,
                 )
@@ -315,14 +406,28 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                     "remote_roles": remote_roles,
                 }
 
-            except Exception:
+            except Exception as exc:  # pragma: no cover - network / RADIUS errors
+                logger.warning(
+                    "Error talking to RADIUS server %s:%s for user %s: %s",
+                    host,
+                    port,
+                    username,
+                    exc,
+                )
                 continue
 
         return {"success": False, "attributes": {}, "remote_roles": []}
 
     @staticmethod
     def _extract_remote_roles_radius(attrs: Dict[str, Any]) -> List[str]:
-        """Return a list of role strings from RADIUS attributes."""
+        """
+        Extract roles from RADIUS attributes (Cisco ISE, FreeRADIUS, etc.).
+
+        Supported patterns:
+          - role = netbox-admin
+          - Cisco-AVPair: shell:role="netbox-admin"
+          - Class = netbox-admin
+        """
         roles: List[str] = []
         if not attrs:
             return roles
@@ -343,9 +448,11 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             for item in values:
                 s = str(item)
                 if "shell:role=" in s:
-                    roles.append(s.split("=", 1)[1].replace('"', ""))
+                    roles.append(
+                        s.split("=", 1)[1].replace('"', "").strip()
+                    )
 
-        # 3) RADIUS Class as generic "role"
+        # 3) Class as generic "role"
         clazz = attrs.get("Class")
         if clazz:
             if isinstance(clazz, list):
@@ -354,8 +461,8 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                 roles.append(str(clazz))
 
         # dedupe
-        out: List[str] = []
         seen = set()
+        out: List[str] = []
         for r in roles:
             if r not in seen:
                 seen.add(r)
@@ -373,7 +480,10 @@ class NetBoxRemoteAuthBackend(BaseBackend):
         result: Dict[str, Any],
         method: str,
     ) -> Optional[User]:
-        auto_create = getattr(settings, "REMOTE_AUTH_AUTO_CREATE_USER", False)
+        """
+        Create or update a NetBox user based on remote authentication result.
+        """
+        auto_create = bool(_cfg("REMOTE_AUTH_AUTO_CREATE_USER", False))
 
         try:
             user = User.objects.get(username=username)
@@ -382,23 +492,25 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             if not auto_create:
                 return None
             user = User(username=username)
-            # IMPORTANT: save before M2M operations
+            # MUST save before touching M2M relations like groups
             user.save()
             created = True
 
+        attrs = result.get("attributes") or {}
         remote_roles = result.get("remote_roles") or []
 
-        # Apply group handling
+        # Apply groups based on roles
         self._apply_group_mapping(user, remote_roles)
 
-        # Superuser / staff flags from group membership
-        super_groups = set(
-            getattr(settings, "REMOTE_AUTH_SUPERUSER_GROUPS", []) or []
-        )
-        staff_groups = set(
-            getattr(settings, "REMOTE_AUTH_STAFF_GROUPS", []) or []
-        )
+        # Superuser / staff flags based on group membership
+        super_groups = set(_cfg("REMOTE_AUTH_SUPERUSER_GROUPS", []) or [])
+        staff_groups = set(_cfg("REMOTE_AUTH_STAFF_GROUPS", []) or [])
+
         names = set(user.groups.values_list("name", flat=True))
+
+        # Reset flags then re-apply based on groups
+        user.is_superuser = False
+        user.is_staff = user.is_staff  # keep staff if something else sets it
 
         if names & super_groups:
             user.is_superuser = True
@@ -407,31 +519,37 @@ class NetBoxRemoteAuthBackend(BaseBackend):
         if names & staff_groups:
             user.is_staff = True
 
+        # On successful remote auth, ensure the account is active
+        user.is_active = True
+
+        # Sync profile info (name, email) from attributes if configured
+        self._apply_profile_attributes(user, attrs)
+
         user.save()
         return user
 
     def _apply_group_mapping(self, user: User, remote_roles: List[str]) -> None:
         """
-        Final group logic:
+        Group logic:
 
           - Start with REMOTE_AUTH_DEFAULT_GROUPS
-          - For each role in remote_roles, add a group with the same name
+          - For each remote role, add a group with the same name
           - If REMOTE_AUTH_GROUP_SYNC_ENABLED is True:
-                clear user's groups and set exactly that set
-            Else:
-                just ensure those groups exist in addition to what's already there
+                clear existing groups first
+
+        We intentionally do NOT use an extra mapping dict here: ISE roles
+        and NetBox group names are expected to be the same.
         """
         # Start from default groups
-        target_names = set(
-            getattr(settings, "REMOTE_AUTH_DEFAULT_GROUPS", []) or []
-        )
+        default_groups = _cfg("REMOTE_AUTH_DEFAULT_GROUPS", []) or []
+        target_names = set(default_groups)
 
-        # Direct role -> same-name group
+        # Each role becomes a group name
         for r in remote_roles:
             if r:
                 target_names.add(str(r))
 
-        sync = bool(getattr(settings, "REMOTE_AUTH_GROUP_SYNC_ENABLED", False))
+        sync = bool(_cfg("REMOTE_AUTH_GROUP_SYNC_ENABLED", False))
 
         if sync:
             user.groups.clear()
@@ -442,10 +560,51 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             try:
                 grp, _ = GroupModel.objects.get_or_create(name=name)
                 user.groups.add(grp)
-            except Exception as e:
+            except Exception as exc:  # pragma: no cover - extremely defensive
                 logger.warning(
                     "Failed adding user %s to group %s: %s",
                     user.username,
                     name,
-                    e,
+                    exc,
                 )
+
+    # ------------------------------------------------------------------
+    # PROFILE ATTRIBUTE SYNC
+    # ------------------------------------------------------------------
+
+    def _apply_profile_attributes(self, user: User, attrs: Dict[str, Any]) -> None:
+        """
+        Optionally set first_name, last_name, and email from TACACS+/RADIUS attrs.
+
+        Configurable via:
+          NETBOX_REMOTE_AUTH_FIRST_NAME_ATTR  (e.g. 'givenName')
+          NETBOX_REMOTE_AUTH_LAST_NAME_ATTR   (e.g. 'sn')
+          NETBOX_REMOTE_AUTH_EMAIL_ATTR       (e.g. 'mail')
+        """
+        if not attrs:
+            return
+
+        def _get_attr(name: Optional[str]) -> Optional[str]:
+            if not name:
+                return None
+            value = attrs.get(name)
+            if value is None:
+                return None
+            if isinstance(value, list) and value:
+                value = value[0]
+            return str(value).strip()
+
+        first_attr = _cfg("NETBOX_REMOTE_AUTH_FIRST_NAME_ATTR", None)
+        last_attr = _cfg("NETBOX_REMOTE_AUTH_LAST_NAME_ATTR", None)
+        email_attr = _cfg("NETBOX_REMOTE_AUTH_EMAIL_ATTR", None)
+
+        first = _get_attr(first_attr)
+        last = _get_attr(last_attr)
+        mail = _get_attr(email_attr)
+
+        if first is not None:
+            user.first_name = first
+        if last is not None:
+            user.last_name = last
+        if mail is not None:
+            user.email = mail
