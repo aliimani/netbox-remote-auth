@@ -163,7 +163,7 @@ All backend configuration lives in this file.
 No edits to `configuration.py` are required.
 
 📄 **Example file:**  
-👉 [netboxauth_config_example.py](https://github.com/aliimani/config/netboxauth_config_example.py)
+👉 [netboxauth_config_example.py](https://github.com/aliimani/netbox-remote-auth/config/netboxauth_config_example.py)
 
 Replace this link with your real repo location.
 
