@@ -1,66 +1,62 @@
 # NetBox Remote Authentication Backend (TACACS+ / RADIUS)
 
-This project provides a custom **remote authentication backend** for NetBox, allowing authentication directly against **TACACS+** or **RADIUS** servers such as Cisco ISE, FreeRADIUS, ACS, or any standard AAA platform.
+This project provides a custom **remote authentication backend** for NetBox that authenticates users directly against **TACACS+** or **RADIUS** servers (Cisco ISE, FreeRADIUS, ACS, NPS, etc.).
 
-The backend retrieves AAA attributes (roles, optional first/last name, email) and maps them into NetBox users and groups.
-
-The backend works for both:
-
-- **NetBox Docker**
-- **Bare‑metal NetBox installations**
+Unlike NetBox’s built‑in `RemoteUserBackend`, this backend communicates **directly** with your AAA server, receives authorization attributes, and maps them to NetBox user groups automatically — **no reverse proxy**, **no HTTP headers**, **no SSO** required.
 
 ---
 
 ## Table of Contents
 
-1. [How It Works](#how-it-works)  
-2. [Features](#features)  
-3. [Requirements](#requirements)  
-4. [Installation](#installation)  
-5. [netboxauth_config.py – Configuration](#netboxauth_configpy--configuration)  
-6. [NetBox Docker Instructions](#netbox-docker-instructions)  
-7. [Bare-Metal NetBox Instructions](#bare-metal-netbox-instructions)  
-8. [AAA Server Configuration](#aaa-server-configuration)  
-9. [Group Mapping Rules](#group-mapping-rules)  
-10. [Troubleshooting](#troubleshooting)  
-11. [Advanced Notes](#advanced-notes)
+1. Overview & How It Works  
+2. Key Features  
+3. Requirements  
+4. Installation  
+   - NetBox Docker Installation  
+   - Bare-Metal Installation  
+5. Configuration File: `netboxauth_config.py`  
+6. NetBox Docker Usage  
+7. Bare-Metal NetBox Usage  
+8. AAA Server Configuration  
+9. Group Mapping Behaviour  
+10. Troubleshooting  
+11. Advanced Notes  
 
 ---
 
-## How It Works
+## Overview & How It Works
 
-1. User enters username/password on the NetBox login page.  
-2. Backend sends credentials to TACACS+ or RADIUS.  
-3. AAA returns authentication status + optional attributes.  
-4. Backend:
-   - Creates NetBox user (if enabled)
-   - Assigns groups based on AAA roles
-   - Ensures user account is active
-   - Sets staff/superuser based on group membership
-   - Optionally assigns first name, last name, and email from AAA attributes
+1. User enters username & password into NetBox login page.  
+2. NetBox invokes this backend instead of the default RemoteUser backend.  
+3. Credentials are sent to TACACS+ or RADIUS.  
+4. AAA validates the credentials and returns attributes/roles.  
+5. Backend:
+   - Creates/updates NetBox local users,
+   - Assigns NetBox groups based on AAA roles,
+   - Applies staff/superuser flags,
+   - Ensures `is_active = True`,
+   - Optionally updates first name, last name, and email.
+
+AAA fully controls whether the user is granted access.
 
 ---
 
-## Features
+## Key Features
 
-- ✔ TACACS+ support  
-- ✔ RADIUS support  
-- ✔ **Multi-server failover**  
-  - If first server fails, second one is tried  
-  - If only one server is used, remove extra entry  
+- ✔ TACACS+ and RADIUS authentication  
+- ✔ Multi-server failover (try servers in order)  
 - ✔ Automatic user creation  
-- ✔ AAA role → NetBox group mapping  
-- ✔ Optional default groups  
-- ✔ Optional staff & superuser mapping  
-- ✔ Works in **Docker** and **bare-metal**  
-- ✔ All configuration in **one file**  
-- ✔ No need to modify `configuration.py`  
+- ✔ Automatic group creation based on AAA roles  
+- ✔ Optional name/email attribute sync  
+- ✔ Works with NetBox Docker and bare-metal  
+- ✔ No configuration changes required in `configuration.py`  
+- ✔ All settings live in one file: `netboxauth_config.py`  
 
 ---
 
 ## Requirements
 
-Install Python dependencies:
+Install required Python packages:
 
 ```bash
 pip install tacacs-plus pyrad typing_extensions
@@ -68,91 +64,160 @@ pip install tacacs-plus pyrad typing_extensions
 
 ---
 
-## Installation
+# Installation
 
-Place backend files in:
-
-```
-netbox/netbox/netboxauth/
-    ├── __init__.py
-    └── backend.py
-```
+The backend package must be installed into the Python environment where NetBox runs.
 
 ---
 
-## `netboxauth_config.py` – Configuration
+# NetBox Docker Installation
 
-Place it in:
-
-- **Docker:** `netbox-docker/configuration/netboxauth_config.py`  
-- **Bare-metal:** `/opt/netbox/netbox/netbox/netboxauth_config.py`
-
-A full example file is included in this repository:  
-`example_netboxauth_config.py`
+NetBox Docker does **not** provide an extensions folder by default.  
+To install this backend, follow these steps.
 
 ---
 
-## NetBox Docker Instructions
+## 1. Clone the repository on your **host** system
 
-### 1. Add config file:
-
-```
-netbox-docker/
-    configuration/
-        netboxauth_config.py
+```bash
+git clone https://github.com/YOUR_REPO_HERE/netbox-remote-auth.git
 ```
 
-Mapped automatically to:
+Replace the repository URL with yours.
+
+---
+
+## 2. Copy the package into the NetBox container
+
+```bash
+CID=$(sudo docker compose ps -q netbox)
+sudo docker cp netbox-remote-auth "$CID":/tmp/netbox-remote-auth
+```
+
+This copies your backend to:
 
 ```
-/etc/netbox/config/
+/tmp/netbox-remote-auth
 ```
 
-### 2. Restart containers:
+inside the container.
+
+---
+
+## 3. Install the package in the container using UV
+
+```bash
+sudo docker exec -it -u root -w /tmp/netbox-remote-auth "$CID" uv pip install .
+```
+
+This installs your backend as a Python module in NetBox’s environment.
+
+---
+
+## 4. Restart NetBox services
 
 ```bash
 sudo docker compose restart netbox netbox-worker
 ```
 
-Restart is required when adding or modifying config files.
-
 ---
 
-## Bare-Metal NetBox Instructions
+# Bare-Metal Installation
 
-Place config file here:
+### 1. Clone the repository
 
-```
-/opt/netbox/netbox/netbox/netboxauth_config.py
-```
-
-Restart NetBox service:
-
-```
-sudo systemctl restart netbox
+```bash
+git clone https://github.com/YOUR_REPO_HERE/netbox-remote-auth.git
 ```
 
 ---
 
-## AAA Server Configuration
+### 2. Install the package inside NetBox virtual environment
 
-Backend supports several role formats:
+```bash
+cd netbox-remote-auth
+source /opt/netbox/venv/bin/activate
+uv pip install .
+deactivate
+```
 
-### TACACS+
-- `role = netbox-admin`
-- `Cisco-AVPair = shell:role="netbox-admin"`
-- `priv-lvl = 15` → becomes group `tacacs-priv-15`
-
-### RADIUS
-- `role = netbox-admin`
-- `Cisco-AVPair = "shell:role=netbox-admin"`
-- `Class = netbox-admin`
-
-### Optional: First/Last Name & Email Mapping
-
-Backend uses standard NetBox remote-auth parameters:
+The backend will be installed automatically at:
 
 ```
+/opt/netbox/venv/lib/python3.x/site-packages/netboxauth/
+```
+
+---
+
+### 3. Restart NetBox
+
+```bash
+sudo systemctl restart netbox netbox-rq
+```
+
+---
+
+# Configuration File: `netboxauth_config.py`
+
+All backend configuration lives in this file.  
+No edits to `configuration.py` are required.
+
+📄 **Example file:**  
+👉 [example_netboxauth_config.py](https://github.com/YOUR_REPO_HERE/example_netboxauth_config.py)
+
+Replace this link with your real repo location.
+
+---
+
+# Example `netboxauth_config.py`
+
+```python
+# NetBox Remote Auth Configuration (TACACS+ / RADIUS)
+
+REMOTE_AUTH_ENABLED = True
+REMOTE_AUTH_BACKEND = "netboxauth.backend.NetBoxRemoteAuthBackend"
+
+REMOTE_AUTH_AUTO_CREATE_USER = True
+REMOTE_AUTH_DEFAULT_GROUPS = ["netbox-staff"]
+REMOTE_AUTH_GROUP_SYNC_ENABLED = True
+
+REMOTE_AUTH_SUPERUSER_GROUPS = ["netbox-admin"]
+REMOTE_AUTH_STAFF_GROUPS = ["netbox-staff"]
+
+NETBOX_REMOTE_AUTH_METHOD = "tacacs"  # or "radius"
+
+# -------------------------------------------------------
+# TACACS+ CONFIGURATION (Enable only if using TACACS)
+# The backend will try each server in order. If the first fails (connection/timeouts),
+# it will try the next one.
+# -------------------------------------------------------
+#
+# NETBOX_REMOTE_AUTH_TACACS = {
+#     "SERVERS": [
+#         {"HOST": "10.10.10.10", "PORT": 49},
+#         {"HOST": "10.10.10.11", "PORT": 49},  # Optional second server, if you only have one TACACS server, remove the second entry.
+#     ],
+#     "SECRET": "SecretKey",
+#     "TIMEOUT": 5,
+# }
+
+# -------------------------------------------------------
+# RADIUS CONFIGURATION (Enable only if using RADIUS)
+# The backend will try each server in order. If the first fails (connection/timeouts),
+# it will try the next one.
+# -------------------------------------------------------
+#
+# NETBOX_REMOTE_AUTH_RADIUS = {
+#     "SERVERS": [
+#         {"HOST": "10.10.20.10", "PORT": 1812},
+#         {"HOST": "10.10.20.11", "PORT": 1812}, # Optional second server, if you only have one RADIUS server, remove the second entry.
+#     ],
+#     "SECRET": "SecretKey",
+#     "TIMEOUT": 5,
+#     # "NAS_IDENTIFIER": "netbox",   # Optional NAS-Identifier override used in RADIUS requests
+# }
+
+# Optional attribute mapping
 REMOTE_AUTH_USER_FIRST_NAME = "givenName"
 REMOTE_AUTH_USER_LAST_NAME  = "sn"
 REMOTE_AUTH_USER_EMAIL      = "mail"
@@ -160,98 +225,96 @@ REMOTE_AUTH_USER_EMAIL      = "mail"
 
 ---
 
-## Group Mapping Rules
+# NetBox Docker Usage
 
-1. Start with:
-
-```
-REMOTE_AUTH_DEFAULT_GROUPS
-```
-
-2. Add groups corresponding to AAA roles.  
-3. If:
+Place file here:
 
 ```
-REMOTE_AUTH_GROUP_SYNC_ENABLED = True
+netbox-docker/configuration/netboxauth_config.py
 ```
 
-→ replace existing groups entirely.  
-4. Privilege groups:
+This becomes inside the container:
 
 ```
-REMOTE_AUTH_SUPERUSER_GROUPS
-REMOTE_AUTH_STAFF_GROUPS
+/etc/netbox/config/netboxauth_config.py
 ```
 
-Control `is_superuser` and `is_staff`.
+Restart containers:
+
+```bash
+sudo docker compose restart netbox netbox-worker
+```
 
 ---
 
-## Troubleshooting
+# Bare-Metal NetBox Usage
 
-### Enter Docker NetBox shell:
+Put file here:
+
+```
+/opt/netbox/netbox/netbox/netboxauth_config.py
+```
+
+Restart:
+
+```bash
+sudo systemctl restart netbox netbox-rq
+```
+
+---
+
+# AAA Server Configuration
+
+### TACACS+ role attributes:
+- `role = netbox-admin`
+- `Cisco-AVPair = shell:role="netbox-admin"`
+- `priv-lvl = 15` → maps to `tacacs-priv-15`
+
+### RADIUS role attributes:
+- `role = netbox-admin`
+- `Cisco-AVPair = "shell:role=netbox-admin"`
+- `Class = netbox-admin`
+
+Each AAA role becomes a **NetBox group name**.
+
+---
+
+# Group Mapping Behaviour
+
+1. Add default groups  
+2. Add AAA role-based groups  
+3. If sync enabled → clear old groups  
+4. Apply staff/superuser group mapping  
+
+---
+
+# Troubleshooting
+
+Enter container:
 
 ```bash
 sudo docker exec -it netbox-docker-netbox-1 bash
-python manage.py shell
 ```
 
-### Check NetBox settings:
-
-```python
-from django.conf import settings
-print(settings.REMOTE_AUTH_BACKEND)
-print(settings.REMOTE_AUTH_ENABLED)
-print(settings.REMOTE_AUTH_SUPERUSER_GROUPS)
-```
-
-### Check backend config:
+Test:
 
 ```python
 from netboxauth.backend import _cfg
-print("Method:", _cfg("NETBOX_REMOTE_AUTH_METHOD"))
-print("TACACS:", _cfg("NETBOX_REMOTE_AUTH_TACACS"))
-print("RADIUS:", _cfg("NETBOX_REMOTE_AUTH_RADIUS"))
+print(_cfg("NETBOX_REMOTE_AUTH_METHOD"))
+print(_cfg("NETBOX_REMOTE_AUTH_TACACS"))
+print(_cfg("NETBOX_REMOTE_AUTH_RADIUS"))
 ```
-
-If any are `None`, config is not being loaded.
 
 ---
 
-## Advanced Notes
-
-### Multi-server failover
-
-Backend tries servers in order:
-
-```python
-"SERVERS": [
-    {"HOST": "10.10.10.10", "PORT": 49},
-    {"HOST": "10.10.10.11", "PORT": 49},
-]
-```
-
-Remove second entry if only one server exists.
-
-### Account Deactivation
-
-Backend does **not** disable NetBox users on failed login  
-→ prevents disabling users who mistype passwords.
-
-AAA controls access:  
-If AAA rejects login → NetBox login fails.
-
----
-
-## Summary
-
-This backend provides:
+# Summary
 
 - Direct TACACS+/RADIUS login  
-- Reliable group + privilege mapping  
-- Optional name/email syncing  
-- Multi-server redundancy  
-- Works seamlessly in Docker & bare-metal  
-- Simple configuration in one file  
+- Multi-server failover  
+- Automatic user/group management  
+- Optional AAA → NetBox attribute sync  
+- Works for both NetBox Docker and bare-metal  
+- All settings in one file  
 
-Pull requests and feature suggestions are welcome!
+Pull requests and feature suggestions welcome!
+
