@@ -80,7 +80,7 @@ To install this backend, follow these steps.
 ## 1. Clone the repository on your **host** system
 
 ```bash
-git clone https://github.com/YOUR_REPO_HERE/netbox-remote-auth.git
+git clone https://github.com/aliimani/netbox-remote-auth.git
 ```
 
 Replace the repository URL with yours.
@@ -127,7 +127,7 @@ sudo docker compose restart netbox netbox-worker
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_REPO_HERE/netbox-remote-auth.git
+git clone https://github.com/aliimani/netbox-remote-auth.git
 ```
 
 ---
@@ -163,7 +163,7 @@ All backend configuration lives in this file.
 No edits to `configuration.py` are required.
 
 📄 **Example file:**  
-👉 [example_netboxauth_config.py](https://github.com/YOUR_REPO_HERE/example_netboxauth_config.py)
+👉 [netboxauth_config_example.py](https://github.com/aliimani/config/netboxauth_config.py)
 
 Replace this link with your real repo location.
 
