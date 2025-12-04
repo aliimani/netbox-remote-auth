@@ -14,6 +14,7 @@ authors = [
 dependencies = [
   "tacacs-plus",
   "pyrad",
+  "typing_extensions",
 ]
 
 license = "MIT"
