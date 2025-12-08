@@ -290,20 +290,117 @@ Each AAA role becomes a **NetBox group name**.
 
 # Troubleshooting
 
-Enter container:
+The recommended flow is:
+
+1. **First check what NetBox sees in `django.conf.settings`**  
+2. **Then check what the backend reads via `_cfg()`**, which merges `netbox.configuration`, `settings`, and `netboxauth_config.py`.
+
+---
+
+## Docker: Check configuration step by step
+
+### 1. Enter the NetBox container and run `manage.py shell`
 
 ```bash
 sudo docker exec -it netbox-docker-netbox-1 bash
+cd /opt/netbox/netbox
+python manage.py shell
 ```
 
-Test:
+### 2. First, check the general NetBox settings
+
+```python
+from django.conf import settings
+
+print("REMOTE_AUTH_BACKEND:", settings.REMOTE_AUTH_BACKEND)
+print("REMOTE_AUTH_ENABLED:", settings.REMOTE_AUTH_ENABLED)
+print("REMOTE_AUTH_SUPERUSER_GROUPS:", getattr(settings, "REMOTE_AUTH_SUPERUSER_GROUPS", None))
+print("REMOTE_AUTH_STAFF_GROUPS:", getattr(settings, "REMOTE_AUTH_STAFF_GROUPS", None))
+```
+
+If these values are not what you expect, the issue is in your NetBox/Docker config (e.g. wrong config file, bad mount).
+
+### 3. Then, check what the backend reads via `_cfg()`
 
 ```python
 from netboxauth.backend import _cfg
-print(_cfg("NETBOX_REMOTE_AUTH_METHOD"))
-print(_cfg("NETBOX_REMOTE_AUTH_TACACS"))
-print(_cfg("NETBOX_REMOTE_AUTH_RADIUS"))
+
+print("NETBOX_REMOTE_AUTH_METHOD:", _cfg("NETBOX_REMOTE_AUTH_METHOD"))
+print("TACACS config:", _cfg("NETBOX_REMOTE_AUTH_TACACS"))
+print("RADIUS config:", _cfg("NETBOX_REMOTE_AUTH_RADIUS"))
+print("REMOTE_AUTH_USER_FIRST_NAME:", _cfg("REMOTE_AUTH_USER_FIRST_NAME"))
+print("REMOTE_AUTH_USER_LAST_NAME:", _cfg("REMOTE_AUTH_USER_LAST_NAME"))
+print("REMOTE_AUTH_USER_EMAIL:", _cfg("REMOTE_AUTH_USER_EMAIL"))
 ```
+
+If `_cfg(...)` returns `None` or `{}`:
+
+- Confirm `netboxauth_config.py` exists inside the container in `/etc/netbox/config/`.  
+- Check for syntax errors in the file.  
+- Ensure you restarted the NetBox containers after creating or editing the file.
+
+---
+
+## Bare-Metal: Check configuration step by step
+
+On the NetBox host:
+
+```bash
+cd /opt/netbox/netbox
+python manage.py shell
+```
+
+### 1. First, inspect `settings`
+
+```python
+from django.conf import settings
+
+print("REMOTE_AUTH_BACKEND:", settings.REMOTE_AUTH_BACKEND)
+print("REMOTE_AUTH_ENABLED:", settings.REMOTE_AUTH_ENABLED)
+print("REMOTE_AUTH_SUPERUSER_GROUPS:", getattr(settings, "REMOTE_AUTH_SUPERUSER_GROUPS", None))
+print("REMOTE_AUTH_STAFF_GROUPS:", getattr(settings, "REMOTE_AUTH_STAFF_GROUPS", None))
+```
+
+### 2. Then, inspect `_cfg()` values
+
+```python
+from netboxauth.backend import _cfg
+
+print("NETBOX_REMOTE_AUTH_METHOD:", _cfg("NETBOX_REMOTE_AUTH_METHOD"))
+print("TACACS config:", _cfg("NETBOX_REMOTE_AUTH_TACACS"))
+print("RADIUS config:", _cfg("NETBOX_REMOTE_AUTH_RADIUS"))
+print("REMOTE_AUTH_USER_FIRST_NAME:", _cfg("REMOTE_AUTH_USER_FIRST_NAME"))
+print("REMOTE_AUTH_USER_LAST_NAME:", _cfg("REMOTE_AUTH_USER_LAST_NAME"))
+print("REMOTE_AUTH_USER_EMAIL:", _cfg("REMOTE_AUTH_USER_EMAIL"))
+```
+
+If `settings` looks correct but `_cfg()` does not:
+
+- Check the location of `netboxauth_config.py`
+- Ensure NetBox has been restarted
+- Confirm there are no import errors (check NetBox logs)
+
+If `_cfg()` looks correct but users still cannot authenticate:
+
+- Check TACACS+/RADIUS secrets, ports, and reachability  
+- Check AAA server policies/logs (Cisco ISE, FreeRADIUS, NPS)  
+
+---
+
+# Advanced Notes
+
+## Multi-server failover
+
+The backend tries all servers listed in `"SERVERS"` in order.  
+If the first is down or unreachable, it logs a warning and tries the next.
+
+## Access removal
+
+If you remove a user or revoke their NetBox access in the AAA policy:
+
+- AAA denies authentication  
+- Backend returns `None`  
+- NetBox login fails even if the local user object still exists  
 
 ---
 
