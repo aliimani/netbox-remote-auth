@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Optional, Dict, Any, List, Tuple
 import logging
 import socket
+import tempfile
+import os
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -257,9 +259,7 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                         rem_addr="netbox",
                         port="https",
                     )
-                    attributes = parse_kv_arguments(
-                        getattr(author, "arguments", [])
-                    )
+                    attributes = parse_kv_arguments(getattr(author, "arguments", []))
                 except Exception as exc:  # pragma: no cover - very defensive
                     logger.warning(
                         "TACACS authorization failed for %s on %s:%s: %s",
@@ -329,9 +329,7 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             for item in values:
                 s = str(item)
                 if "shell:role=" in s:
-                    roles.append(
-                        s.split("=", 1)[1].replace('"', "").strip()
-                    )
+                    roles.append(s.split("=", 1)[1].replace('"', "").strip())
 
         # 3) priv-lvl as pseudo-role
         if "priv-lvl" in attrs:
@@ -364,6 +362,7 @@ class NetBoxRemoteAuthBackend(BaseBackend):
 
         try:
             from pyrad.client import Client
+            from pyrad.dictionary import Dictionary
             import pyrad.packet as packet
         except ImportError:  # pragma: no cover - dependency missing
             logger.error(
@@ -372,55 +371,114 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             )
             return {"success": False, "attributes": {}, "remote_roles": []}
 
-        for host, port in servers:
-            try:
-                client = Client(server=host, secret=secret.encode())
-                client.timeout = timeout
-                client.authport = port
+        # Minimal dictionary embedded in code (no extra project file needed)
+        MIN_RADIUS_DICT = b"""
+ATTRIBUTE User-Name 1 string
+ATTRIBUTE User-Password 2 string
+ATTRIBUTE NAS-IP-Address 4 ipaddr
+ATTRIBUTE NAS-Port 5 integer
+ATTRIBUTE Service-Type 6 integer
+ATTRIBUTE Reply-Message 18 string
+ATTRIBUTE State 24 string
+ATTRIBUTE Class 25 string
+ATTRIBUTE NAS-Identifier 32 string
+"""
 
-                req = client.CreateAuthPacket(code=packet.AccessRequest)
-                req["User-Name"] = username
-                req["User-Password"] = req.PwCrypt(password)
-                req["NAS-Identifier"] = nas_id
+        dict_path: Optional[str] = None
+        try:
+            fd, dict_path = tempfile.mkstemp(prefix="netbox-radius-", suffix=".dict")
+            os.write(fd, MIN_RADIUS_DICT)
+            os.close(fd)
+            radius_dict = Dictionary(dict_path)
+        except Exception as exc:
+            logger.error(
+                "Failed to create/load embedded RADIUS dictionary: %s",
+                exc,
+                exc_info=True,
+            )
+            if dict_path:
+                try:
+                    os.unlink(dict_path)
+                except Exception:
+                    pass
+            return {"success": False, "attributes": {}, "remote_roles": []}
 
-                reply = client.SendPacket(req)
-                if reply.code != packet.AccessAccept:
-                    # Authentication failed on this server; try the next
+        try:
+            for host, port in servers:
+                try:
+                    client = Client(server=host, secret=secret.encode(), dict=radius_dict)
+                    client.timeout = timeout
+                    client.authport = port
+
+                    req = client.CreateAuthPacket(code=packet.AccessRequest)
+                    req["User-Name"] = username
+
+                    # Use plain password; pyrad encrypts it correctly when sending.
+                    req["User-Password"] = password
+
+                    req["NAS-Identifier"] = nas_id
+
+                    # Uncomment only if your RADIUS policy requires them:
+                    # req["Service-Type"] = 1  # Login-User
+                    # req["NAS-Port"] = 0
+
+                    reply = client.SendPacket(req)
+
+                    if reply.code != packet.AccessAccept:
+                        logger.info(
+                            "RADIUS reject from %s:%s for user %s (code=%s)",
+                            host,
+                            port,
+                            username,
+                            reply.code,
+                        )
+                        continue
+
+                    attributes: Dict[str, Any] = {}
+                    for k, v in reply.items():
+                        if isinstance(v, list) and len(v) == 1:
+                            attributes[str(k)] = v[0]
+                        else:
+                            attributes[str(k)] = v
+
+                    remote_roles = self._extract_remote_roles_radius(attributes)
+
+                    logger.info("RADIUS accept for user %s via %s:%s", username, host, port)
+                    logger.debug(
+                        "RADIUS: attributes for %s via %s:%s: %r; remote_roles=%r",
+                        username,
+                        host,
+                        port,
+                        attributes,
+                        remote_roles,
+                    )
+
+                    return {
+                        "success": True,
+                        "attributes": attributes,
+                        "remote_roles": remote_roles,
+                    }
+
+                except Exception as exc:  # pragma: no cover - network / RADIUS errors
+                    logger.warning(
+                        "Error talking to RADIUS server %s:%s for user %s: %s",
+                        host,
+                        port,
+                        username,
+                        exc,
+                        exc_info=True,
+                    )
                     continue
 
-                attributes: Dict[str, Any] = {}
-                for key in reply.keys():
-                    val = reply.get(key)
-                    attributes[key] = val[0] if len(val) == 1 else val
+            return {"success": False, "attributes": {}, "remote_roles": []}
 
-                remote_roles = self._extract_remote_roles_radius(attributes)
-
-                logger.debug(
-                    "RADIUS: attributes for %s via %s:%s: %r; remote_roles=%r",
-                    username,
-                    host,
-                    port,
-                    attributes,
-                    remote_roles,
-                )
-
-                return {
-                    "success": True,
-                    "attributes": attributes,
-                    "remote_roles": remote_roles,
-                }
-
-            except Exception as exc:  # pragma: no cover - network / RADIUS errors
-                logger.warning(
-                    "Error talking to RADIUS server %s:%s for user %s: %s",
-                    host,
-                    port,
-                    username,
-                    exc,
-                )
-                continue
-
-        return {"success": False, "attributes": {}, "remote_roles": []}
+        finally:
+            # best-effort cleanup of the temp dictionary file
+            if dict_path:
+                try:
+                    os.unlink(dict_path)
+                except Exception:
+                    pass
 
     @staticmethod
     def _extract_remote_roles_radius(attrs: Dict[str, Any]) -> List[str]:
@@ -452,9 +510,7 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             for item in values:
                 s = str(item)
                 if "shell:role=" in s:
-                    roles.append(
-                        s.split("=", 1)[1].replace('"', "").strip()
-                    )
+                    roles.append(s.split("=", 1)[1].replace('"', "").strip())
 
         # 3) Class as generic "role"
         clazz = attrs.get("Class")
