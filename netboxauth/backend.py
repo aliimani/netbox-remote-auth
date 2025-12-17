@@ -75,10 +75,10 @@ def get_server_list(cfg: Dict[str, Any], default_port: int) -> List[Tuple[str, i
     Return list of (host, port) tuples for failover.
 
     Supports:
-      cfg["SERVERS"] = [{"HOST": "...", "PORT": 49}, ...]
+      cfg["SERVERS"] = [{"HOST": "...", "PORT": 49/1812}, ...]
     Or legacy:
       cfg["HOST"] = "..."
-      cfg["PORT"] = 49
+      cfg["PORT"] = 49/1812
     """
     if not cfg:
         return []
@@ -137,6 +137,38 @@ def parse_kv_arguments(args: List[Any]) -> Dict[str, Any]:
     return result
 
 
+def _normalize_text(v: Any) -> str:
+    """
+    Normalize RADIUS/TACACS attribute values into a clean string.
+    Handles bytes properly (critical for RADIUS Class values).
+    """
+    if v is None:
+        return ""
+    if isinstance(v, bytes):
+        try:
+            return v.decode(errors="ignore").strip()
+        except Exception:
+            return ""
+    return str(v).strip()
+
+
+def _split_multi(v: Any) -> List[str]:
+    """
+    Normalize and split multi-valued role strings.
+    Handles bytes, str, comma-separated, semicolon-separated values.
+    """
+    s = _normalize_text(v)
+    if not s:
+        return []
+
+    # Some systems might send "a,b" or "a; b" as a single attribute.
+    if "," in s:
+        return [p.strip() for p in s.split(",") if p.strip()]
+    if ";" in s:
+        return [p.strip() for p in s.split(";") if p.strip()]
+    return [s]
+
+
 # ----------------------------------------------------------------------
 # Main Backend
 # ----------------------------------------------------------------------
@@ -146,19 +178,13 @@ class NetBoxRemoteAuthBackend(BaseBackend):
     """
     NetBox authentication backend using TACACS+ or RADIUS (e.g. Cisco ISE).
 
-    Works in both netbox-docker and bare-metal NetBox installs.
-
     Behaviour:
       - Authenticates against TACACS+ / RADIUS.
       - Supports multiple servers for failover.
       - Creates/updates users & groups.
       - Sets is_staff / is_superuser based on groups.
       - On success, ensures user.is_active = True.
-      - Optionally syncs first_name, last_name, email from AAA attributes
-        using the standard NetBox config keys:
-          * REMOTE_AUTH_USER_FIRST_NAME
-          * REMOTE_AUTH_USER_LAST_NAME
-          * REMOTE_AUTH_USER_EMAIL
+      - Optionally syncs first_name, last_name, email from AAA attributes.
     """
 
     # ------------------------------------------------------------------
@@ -195,7 +221,6 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             result = self._authenticate_radius(username, password)
 
         if not result.get("success"):
-            # AAA rejected (wrong password, no policy, etc.)
             return None
 
         return self._get_or_create_user(username, password, result, method)
@@ -223,10 +248,9 @@ class NetBoxRemoteAuthBackend(BaseBackend):
 
         try:
             from tacacs_plus.client import TACACSClient
-        except ImportError:  # pragma: no cover - dependency missing
+        except ImportError:  # pragma: no cover
             logger.error(
-                "tacacs-plus package is not installed; "
-                "TACACS+ authentication is unavailable."
+                "tacacs-plus package is not installed; TACACS+ authentication is unavailable."
             )
             return {"success": False, "attributes": {}, "remote_roles": []}
 
@@ -248,7 +272,6 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                 )
 
                 if not getattr(auth_result, "valid", False):
-                    # Authentication failed on this server; try next
                     continue
 
                 # Authorization to fetch AVPairs (role, priv-lvl, etc.)
@@ -260,13 +283,14 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                         port="https",
                     )
                     attributes = parse_kv_arguments(getattr(author, "arguments", []))
-                except Exception as exc:  # pragma: no cover - very defensive
+                except Exception as exc:  # pragma: no cover
                     logger.warning(
                         "TACACS authorization failed for %s on %s:%s: %s",
                         username,
                         host,
                         port,
                         exc,
+                        exc_info=True,
                     )
                     attributes = {}
 
@@ -287,13 +311,14 @@ class NetBoxRemoteAuthBackend(BaseBackend):
                     "remote_roles": remote_roles,
                 }
 
-            except Exception as exc:  # pragma: no cover - network / TACACS errors
+            except Exception as exc:  # pragma: no cover
                 logger.warning(
                     "Error talking to TACACS server %s:%s for user %s: %s",
                     host,
                     port,
                     username,
                     exc,
+                    exc_info=True,
                 )
                 continue
 
@@ -302,11 +327,11 @@ class NetBoxRemoteAuthBackend(BaseBackend):
     @staticmethod
     def _extract_remote_roles_tacacs(attrs: Dict[str, Any]) -> List[str]:
         """
-        Extract roles from TACACS attributes (Cisco ISE, etc.).
+        Extract roles from TACACS attributes.
 
-        Supported patterns:
-          - role=netbox-admin
-          - Cisco-AVPair: shell:role="netbox-admin"
+        Supports:
+          - role=netbox-admin (may appear multiple times)
+          - Cisco-AVPair: shell:role="netbox-admin" (may appear multiple times)
           - priv-lvl -> pseudo-role tacacs-priv-<N>
         """
         roles: List[str] = []
@@ -315,31 +340,32 @@ class NetBoxRemoteAuthBackend(BaseBackend):
 
         # 1) Direct "role" attribute
         val = attrs.get("role")
-        if isinstance(val, list):
-            roles.extend(str(v) for v in val if v)
-        elif val:
-            roles.append(str(val))
+        values = val if isinstance(val, list) else ([val] if val else [])
+        for v in values:
+            roles.extend(_split_multi(v))
 
         # 2) Cisco AVPair: shell:role="xyz"
         for key in ("Cisco-AVPair", "cisco-av-pair"):
             cav = attrs.get(key)
             if not cav:
                 continue
-            values = cav if isinstance(cav, list) else [cav]
-            for item in values:
-                s = str(item)
+            cav_values = cav if isinstance(cav, list) else [cav]
+            for item in cav_values:
+                s = _normalize_text(item)
                 if "shell:role=" in s:
-                    roles.append(s.split("=", 1)[1].replace('"', "").strip())
+                    extracted = s.split("=", 1)[1].replace('"', "").strip()
+                    roles.extend(_split_multi(extracted))
 
         # 3) priv-lvl as pseudo-role
         if "priv-lvl" in attrs:
-            roles.append(f"tacacs-priv-{attrs['priv-lvl']}")
+            roles.append(f"tacacs-priv-{_normalize_text(attrs['priv-lvl'])}")
 
         # dedupe
         seen = set()
         out: List[str] = []
         for r in roles:
-            if r not in seen:
+            r = _normalize_text(r)
+            if r and r not in seen:
                 seen.add(r)
                 out.append(r)
         return out
@@ -364,14 +390,11 @@ class NetBoxRemoteAuthBackend(BaseBackend):
             from pyrad.client import Client
             from pyrad.dictionary import Dictionary
             import pyrad.packet as packet
-        except ImportError:  # pragma: no cover - dependency missing
-            logger.error(
-                "pyrad package is not installed; "
-                "RADIUS authentication is unavailable."
-            )
+        except ImportError:  # pragma: no cover
+            logger.error("pyrad package is not installed; RADIUS authentication is unavailable.")
             return {"success": False, "attributes": {}, "remote_roles": []}
 
-        # Minimal dictionary embedded in code (no extra project file needed)
+        # Minimal dictionary embedded in code (no additional project file needed).
         MIN_RADIUS_DICT = b"""
 ATTRIBUTE User-Name 1 string
 ATTRIBUTE User-Password 2 string
@@ -382,6 +405,11 @@ ATTRIBUTE Reply-Message 18 string
 ATTRIBUTE State 24 string
 ATTRIBUTE Class 25 string
 ATTRIBUTE NAS-Identifier 32 string
+
+VENDOR Cisco 9
+BEGIN-VENDOR Cisco
+ATTRIBUTE Cisco-AVPair 1 string
+END-VENDOR Cisco
 """
 
         dict_path: Optional[str] = None
@@ -404,6 +432,8 @@ ATTRIBUTE NAS-Identifier 32 string
             return {"success": False, "attributes": {}, "remote_roles": []}
 
         try:
+            logger.info("RADIUS auth attempt for %s using %d server(s)", username, len(servers))
+
             for host, port in servers:
                 try:
                     client = Client(server=host, secret=secret.encode(), dict=radius_dict)
@@ -413,14 +443,10 @@ ATTRIBUTE NAS-Identifier 32 string
                     req = client.CreateAuthPacket(code=packet.AccessRequest)
                     req["User-Name"] = username
 
-                    # Use plain password; pyrad encrypts it correctly when sending.
-                    req["User-Password"] = password
+                    # IMPORTANT for Cisco ISE (and valid generally): encrypted User-Password
+                    req["User-Password"] = req.PwCrypt(password)
 
                     req["NAS-Identifier"] = nas_id
-
-                    # Uncomment only if your RADIUS policy requires them:
-                    # req["Service-Type"] = 1  # Login-User
-                    # req["NAS-Port"] = 0
 
                     reply = client.SendPacket(req)
 
@@ -436,20 +462,21 @@ ATTRIBUTE NAS-Identifier 32 string
 
                     attributes: Dict[str, Any] = {}
                     for k, v in reply.items():
+                        # Normalize list-of-one -> scalar, keep list if multi-valued
                         if isinstance(v, list) and len(v) == 1:
-                            attributes[str(k)] = v[0]
+                            attributes[k] = v[0]  # keep original key type
                         else:
-                            attributes[str(k)] = v
+                            attributes[k] = v      # keep original key type
 
                     remote_roles = self._extract_remote_roles_radius(attributes)
 
                     logger.info("RADIUS accept for user %s via %s:%s", username, host, port)
                     logger.debug(
-                        "RADIUS: attributes for %s via %s:%s: %r; remote_roles=%r",
-                        username,
-                        host,
-                        port,
-                        attributes,
+                        "RADIUS: attributes keys=%r",
+                        list(attributes.keys()),
+                    )
+                    logger.debug(
+                        "RADIUS: remote_roles=%r",
                         remote_roles,
                     )
 
@@ -459,7 +486,7 @@ ATTRIBUTE NAS-Identifier 32 string
                         "remote_roles": remote_roles,
                     }
 
-                except Exception as exc:  # pragma: no cover - network / RADIUS errors
+                except Exception as exc:  # pragma: no cover
                     logger.warning(
                         "Error talking to RADIUS server %s:%s for user %s: %s",
                         host,
@@ -473,7 +500,6 @@ ATTRIBUTE NAS-Identifier 32 string
             return {"success": False, "attributes": {}, "remote_roles": []}
 
         finally:
-            # best-effort cleanup of the temp dictionary file
             if dict_path:
                 try:
                     os.unlink(dict_path)
@@ -481,50 +507,63 @@ ATTRIBUTE NAS-Identifier 32 string
                     pass
 
     @staticmethod
-    def _extract_remote_roles_radius(attrs: Dict[str, Any]) -> List[str]:
+    def _extract_remote_roles_radius(attrs: Dict[Any, Any]) -> List[str]:
         """
-        Extract roles from RADIUS attributes (Cisco ISE, FreeRADIUS, etc.).
+        Extract roles from RADIUS attributes.
 
         Supported patterns:
-          - role = netbox-admin
-          - Cisco-AVPair: shell:role="netbox-admin"
-          - Class = netbox-admin
+          - role = netbox-admin (single or multi)
+          - Cisco-AVPair: shell:role="netbox-admin" (single or multi)
+          - Class = netbox-admin (single or multi)
+
+        IMPORTANT:
+          Some pyrad/dictionary combinations may expose "Class" as:
+            - "Class" (string key)
+            - 25 (numeric key)
+            - a pyrad attribute object
+          So we look up by name AND by the standard ID (25).
         """
         roles: List[str] = []
         if not attrs:
             return roles
 
+        def _get_any(keys: List[Any]) -> Any:
+            for k in keys:
+                if k in attrs:
+                    return attrs.get(k)
+            # Also try stringified key matching as a fallback
+            for k_attr in attrs.keys():
+                if _normalize_text(k_attr) in [str(x) for x in keys]:
+                    return attrs.get(k_attr)
+            return None
+
         # 1) Direct "role"
-        val = attrs.get("role")
-        if isinstance(val, list):
-            roles.extend(str(v) for v in val if v)
-        elif val:
-            roles.append(str(val))
+        val = _get_any(["role"])
+        values = val if isinstance(val, list) else ([val] if val else [])
+        for v in values:
+            roles.extend(_split_multi(v))
 
         # 2) Cisco AVPair shell:role="xyz"
-        for key in ("Cisco-AVPair", "cisco-av-pair"):
-            cav = attrs.get(key)
-            if not cav:
-                continue
-            values = cav if isinstance(cav, list) else [cav]
-            for item in values:
-                s = str(item)
-                if "shell:role=" in s:
-                    roles.append(s.split("=", 1)[1].replace('"', "").strip())
+        cav = _get_any(["Cisco-AVPair", "cisco-av-pair"])
+        cav_values = cav if isinstance(cav, list) else ([cav] if cav else [])
+        for item in cav_values:
+            s = _normalize_text(item)
+            if "shell:role=" in s:
+                extracted = s.split("=", 1)[1].replace('"', "").strip()
+                roles.extend(_split_multi(extracted))
 
-        # 3) Class as generic "role"
-        clazz = attrs.get("Class")
-        if clazz:
-            if isinstance(clazz, list):
-                roles.extend(str(v) for v in clazz if v)
-            else:
-                roles.append(str(clazz))
+        # 3) Class (by name or by ID 25)
+        clazz = _get_any(["Class", 25])
+        clazz_values = clazz if isinstance(clazz, list) else ([clazz] if clazz else [])
+        for v in clazz_values:
+            roles.extend(_split_multi(v))
 
         # dedupe
         seen = set()
         out: List[str] = []
         for r in roles:
-            if r not in seen:
+            r = _normalize_text(r)
+            if r and r not in seen:
                 seen.add(r)
                 out.append(r)
         return out
@@ -547,14 +586,11 @@ ATTRIBUTE NAS-Identifier 32 string
 
         try:
             user = User.objects.get(username=username)
-            created = False
         except User.DoesNotExist:
             if not auto_create:
                 return None
             user = User(username=username)
-            # MUST save before touching M2M relations like groups
-            user.save()
-            created = True
+            user.save()  # save before touching M2M
 
         attrs = result.get("attributes") or {}
         remote_roles = result.get("remote_roles") or []
@@ -568,10 +604,8 @@ ATTRIBUTE NAS-Identifier 32 string
 
         names = set(user.groups.values_list("name", flat=True))
 
-        # Reset flags then re-apply based on groups
         user.is_superuser = False
-        # keep existing staff if some other mechanism sets it, then OR with mapping
-        staff_flag = user.is_staff
+        staff_flag = user.is_staff  # preserve existing staff, then OR with mapping
 
         if names & super_groups:
             user.is_superuser = True
@@ -581,11 +615,8 @@ ATTRIBUTE NAS-Identifier 32 string
             staff_flag = True
 
         user.is_staff = staff_flag
-
-        # On successful remote auth, ensure the account is active
         user.is_active = True
 
-        # Sync profile info (name, email) from attributes if configured
         self._apply_profile_attributes(user, attrs)
 
         user.save()
@@ -595,41 +626,98 @@ ATTRIBUTE NAS-Identifier 32 string
         """
         Group logic:
 
-          - Start with REMOTE_AUTH_DEFAULT_GROUPS
-          - For each remote role, add a group with the same name
-          - If REMOTE_AUTH_GROUP_SYNC_ENABLED is True:
+        - Start with REMOTE_AUTH_DEFAULT_GROUPS
+        - For each remote role, add a group with the same name (or mapped name)
+        - If REMOTE_AUTH_GROUP_SYNC_ENABLED is True:
                 clear existing groups first
 
-        We intentionally do NOT use an extra mapping dict here: ISE roles
-        and NetBox group names are expected to be the same.
+        Optional mapping table:
+        NETBOX_REMOTE_AUTH_GROUP_MAP = {
+            "ise-role-a": ["netbox-staff", "netbox-readonly"],
+            "ise-role-b": "netbox-admin",
+        }
+
+        Optional allow-list (recommended to prevent junk groups):
+        NETBOX_REMOTE_AUTH_ALLOWED_GROUPS = ["netbox-admin", "netbox-staff", "netbox-ipam-admin"]
+
+        Optional deny prefixes:
+        NETBOX_REMOTE_AUTH_DENY_GROUP_PREFIXES = ["CACS:"]
         """
+
+        def _norm(v: Any) -> str:
+            if v is None:
+                return ""
+            if isinstance(v, bytes):
+                try:
+                    return v.decode(errors="ignore").strip()
+                except Exception:
+                    return ""
+            return str(v).strip()
+
         # Start from default groups
         default_groups = _cfg("REMOTE_AUTH_DEFAULT_GROUPS", []) or []
-        target_names = set(default_groups)
+        target_names = set(_norm(g) for g in default_groups if _norm(g))
 
-        # Each role becomes a group name
-        for r in remote_roles:
-            if r:
-                target_names.add(str(r))
+        # Optional mapping table (keeps your existing behavior if not set)
+        group_map = _cfg("NETBOX_REMOTE_AUTH_GROUP_MAP", {}) or {}
+
+        # Optional allow-list (if not set, it's ignored)
+        allowed_groups = set(_cfg("NETBOX_REMOTE_AUTH_ALLOWED_GROUPS", []) or [])
+
+        # Deny prefixes: always block Cisco ISE internal session Class (CACS:...)
+        deny_prefixes = list(_cfg("NETBOX_REMOTE_AUTH_DENY_GROUP_PREFIXES", []) or [])
+        if "CACS:" not in deny_prefixes:
+            deny_prefixes.append("CACS:")
+
+        for r in remote_roles or []:
+            role = _norm(r)
+            if not role:
+                continue
+
+            # Block Cisco ISE internal/session identifiers (commonly sent as Class)
+            # Example: CACS:<opaque>:<ise-node>/<session>/<counter>
+            if any(role.startswith(pfx) for pfx in deny_prefixes if pfx):
+                continue
+
+            # Apply mapping if configured
+            mapped = group_map.get(role)
+            if mapped:
+                if isinstance(mapped, (list, tuple, set)):
+                    candidates = [_norm(x) for x in mapped]
+                else:
+                    candidates = [_norm(mapped)]
+            else:
+                candidates = [role]
+
+            # Add candidates, optionally constrained by allow-list
+            for name in candidates:
+                name = _norm(name)
+                if not name:
+                    continue
+                if allowed_groups and name not in allowed_groups:
+                    continue
+                target_names.add(name)
 
         sync = bool(_cfg("REMOTE_AUTH_GROUP_SYNC_ENABLED", False))
-
         if sync:
             user.groups.clear()
 
         for name in target_names:
+            name = _norm(name)
             if not name:
                 continue
             try:
                 grp, _ = GroupModel.objects.get_or_create(name=name)
                 user.groups.add(grp)
-            except Exception as exc:  # pragma: no cover - extremely defensive
+            except Exception as exc:  # pragma: no cover
                 logger.warning(
                     "Failed adding user %s to group %s: %s",
                     user.username,
                     name,
                     exc,
+                    exc_info=True,
                 )
+
 
     # ------------------------------------------------------------------
     # PROFILE ATTRIBUTE SYNC
@@ -639,12 +727,10 @@ ATTRIBUTE NAS-Identifier 32 string
         """
         Optionally set first_name, last_name, and email from TACACS+/RADIUS attrs.
 
-        Uses the standard NetBox remote-auth config keys, but instead of
-        HTTP headers we interpret them as AAA attribute names:
-
-          REMOTE_AUTH_USER_FIRST_NAME  -> attribute name for first name
-          REMOTE_AUTH_USER_LAST_NAME   -> attribute name for last name
-          REMOTE_AUTH_USER_EMAIL       -> attribute name for email
+        Uses these config keys as AAA attribute names:
+          REMOTE_AUTH_USER_FIRST_NAME
+          REMOTE_AUTH_USER_LAST_NAME
+          REMOTE_AUTH_USER_EMAIL
         """
         if not attrs:
             return
@@ -652,12 +738,23 @@ ATTRIBUTE NAS-Identifier 32 string
         def _get_attr(name: Optional[str]) -> Optional[str]:
             if not name:
                 return None
-            value = attrs.get(name)
+
+            # attrs keys might be non-string; attempt direct and fallback match
+            value = None
+            if name in attrs:
+                value = attrs.get(name)
+            else:
+                for k in attrs.keys():
+                    if _normalize_text(k) == name:
+                        value = attrs.get(k)
+                        break
+
             if value is None:
                 return None
             if isinstance(value, list) and value:
                 value = value[0]
-            return str(value).strip()
+            text = _normalize_text(value)
+            return text or None
 
         first_attr = _cfg("REMOTE_AUTH_USER_FIRST_NAME", None)
         last_attr = _cfg("REMOTE_AUTH_USER_LAST_NAME", None)
