@@ -268,9 +268,8 @@ sudo systemctl restart netbox netbox-rq
 The backend can receive one or more roles and will map **each role to a NetBox group**.
 
 Supported patterns:
-- `role = netbox-admin` (can be returned multiple times)
-- `Cisco-AVPair = shell:role="netbox-admin"` (can be returned multiple times)
-- `priv-lvl = 15` → maps to the pseudo-role/group `tacacs-priv-15`
+- `role = netbox-admin`
+- `Cisco-AVPair = shell:role="netbox-admin"`
 
 ✅ Multiple groups example (TACACS+):
 - `role = netbox-admin`
@@ -285,9 +284,9 @@ Supported patterns:
 The backend can receive one or more roles and will map **each role to a NetBox group**.
 
 Supported patterns:
-- `role = netbox-admin` (can be returned multiple times)
-- `Cisco-AVPair = shell:role="netbox-admin"` (can be returned multiple times)
-- `Class = netbox-admin` (**recommended**; can be returned multiple times)
+- `role = netbox-admin` 
+- `Cisco-AVPair = shell:role="netbox-admin"` 
+- `Class = netbox-admin`
 
 ✅ Multiple groups example (RADIUS / Cisco ISE):
 - `Class = netbox-admin`
