@@ -263,7 +263,7 @@ sudo systemctl restart netbox netbox-rq
 
 ---
 
-### TACACS+ role attributes (supports multiple groups)
+# TACACS+ role attributes (supports multiple groups)
 
 The backend can receive one or more roles and will map **each role to a NetBox group**.
 
@@ -279,7 +279,7 @@ User is assigned to **both** NetBox groups: `netbox-admin`, `netbox-ipam-admin`
 
 ---
 
-### RADIUS role attributes (supports multiple groups)
+# RADIUS role attributes (supports multiple groups)
 
 The backend can receive one or more roles and will map **each role to a NetBox group**.
 
