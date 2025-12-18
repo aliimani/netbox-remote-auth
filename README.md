@@ -263,19 +263,43 @@ sudo systemctl restart netbox netbox-rq
 
 ---
 
-# AAA Server Configuration
+### TACACS+ role attributes (supports multiple groups)
 
-### TACACS+ role attributes:
-- `role = netbox-admin`
-- `Cisco-AVPair = shell:role="netbox-admin"`
-- `priv-lvl = 15` → maps to `tacacs-priv-15`
+The backend can receive one or more roles and will map **each role to a NetBox group**.
 
-### RADIUS role attributes:
+Supported patterns:
+- `role = netbox-admin` (can be returned multiple times)
+- `Cisco-AVPair = shell:role="netbox-admin"` (can be returned multiple times)
+- `priv-lvl = 15` → maps to the pseudo-role/group `tacacs-priv-15`
+
+✅ Multiple groups example (TACACS+):
 - `role = netbox-admin`
-- `Cisco-AVPair = "shell:role=netbox-admin"`
+- `role = netbox-ipam-admin`
+User is assigned to **both** NetBox groups: `netbox-admin`, `netbox-ipam-admin`
+
+---
+
+### RADIUS role attributes (supports multiple groups)
+
+The backend can receive one or more roles and will map **each role to a NetBox group**.
+
+Supported patterns:
+- `role = netbox-admin` (can be returned multiple times)
+- `Cisco-AVPair = shell:role="netbox-admin"` (can be returned multiple times)
+- `Class = netbox-admin` (**recommended**; can be returned multiple times)
+
+✅ Multiple groups example (RADIUS / Cisco ISE):
 - `Class = netbox-admin`
+- `Class = netbox-staff`
+User is assigned to **both** NetBox groups: `netbox-admin`, `netbox-staff`
 
-Each AAA role becomes a **NetBox group name**.
+⚠️ Cisco ISE note:
+Cisco ISE may also inject an internal session value like:
+- `Class = CACS:<session-id>`
+
+The backend should **ignore** these `CACS:` values to prevent NetBox from creating unwanted groups.
+
+**Each AAA role becomes a NetBox group name.**
 
 ---
 
