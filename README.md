@@ -276,7 +276,7 @@ Supported patterns:
 - `role = netbox-admin`
 - `role = netbox-ipam-admin`
 
-User is assigned to **both** NetBox groups: `netbox-admin`, `netbox-ipam-admin`
+   User is assigned to **both** NetBox groups: `netbox-admin`, `netbox-ipam-admin`
 
 ---
 
@@ -293,7 +293,7 @@ Supported patterns:
 - `Class = netbox-admin`
 - `Class = netbox-staff`
 
-User is assigned to **both** NetBox groups: `netbox-admin`, `netbox-staff`
+   User is assigned to **both** NetBox groups: `netbox-admin`, `netbox-staff`
 
 ⚠️ Cisco ISE note:
 Cisco ISE may also inject an internal session value like:
