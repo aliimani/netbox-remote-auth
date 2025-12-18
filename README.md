@@ -275,6 +275,7 @@ Supported patterns:
 ✅ Multiple groups example (TACACS+):
 - `role = netbox-admin`
 - `role = netbox-ipam-admin`
+
 User is assigned to **both** NetBox groups: `netbox-admin`, `netbox-ipam-admin`
 
 ---
@@ -291,6 +292,7 @@ Supported patterns:
 ✅ Multiple groups example (RADIUS / Cisco ISE):
 - `Class = netbox-admin`
 - `Class = netbox-staff`
+
 User is assigned to **both** NetBox groups: `netbox-admin`, `netbox-staff`
 
 ⚠️ Cisco ISE note:
