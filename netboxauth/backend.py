@@ -16,6 +16,18 @@ User = get_user_model()
 # Use the actual Group model attached to User.groups (NetBox's custom group model)
 GroupModel = User._meta.get_field("groups").remote_field.model
 
+def _has_user_field(field_name: str) -> bool:
+    """Return True if the active User model exposes a concrete field."""
+    try:
+        User._meta.get_field(field_name)
+        return True
+    except Exception:
+        return False
+
+
+USER_HAS_IS_SUPERUSER = _has_user_field("is_superuser")
+USER_HAS_IS_STAFF = _has_user_field("is_staff")
+USER_HAS_IS_ACTIVE = _has_user_field("is_active")
 
 # ----------------------------------------------------------------------
 # Configuration loading (Docker + bare-metal)
@@ -182,8 +194,9 @@ class NetBoxRemoteAuthBackend(BaseBackend):
       - Authenticates against TACACS+ / RADIUS.
       - Supports multiple servers for failover.
       - Creates/updates users & groups.
-      - Sets is_staff / is_superuser based on groups.
-      - On success, ensures user.is_active = True.
+      - Sets is_superuser based on groups.
+      - Sets is_staff when the active User model exposes that field.
+      - On success, ensures user.is_active = True (when field exists).
       - Optionally syncs first_name, last_name, email from AAA attributes.
     """
 
@@ -598,24 +611,35 @@ END-VENDOR Cisco
         # Apply groups based on roles
         self._apply_group_mapping(user, remote_roles)
 
-        # Superuser / staff flags based on group membership
+        # Superuser / staff flags based on group membership.
+        # NOTE: NetBox 4.x user model no longer provides `is_staff`.
         super_groups = set(_cfg("REMOTE_AUTH_SUPERUSER_GROUPS", []) or [])
         staff_groups = set(_cfg("REMOTE_AUTH_STAFF_GROUPS", []) or [])
 
         names = set(user.groups.values_list("name", flat=True))
 
-        user.is_superuser = False
-        staff_flag = user.is_staff  # preserve existing staff, then OR with mapping
+        if USER_HAS_IS_SUPERUSER:
+            user.is_superuser = False
+
+        # Preserve existing staff where available, then OR with mapping.
+        staff_flag = bool(getattr(user, "is_staff", False))
 
         if names & super_groups:
-            user.is_superuser = True
-            staff_flag = True
+             if USER_HAS_IS_SUPERUSER:
+                user.is_superuser = True
 
         if names & staff_groups:
             staff_flag = True
 
-        user.is_staff = staff_flag
-        user.is_active = True
+        if USER_HAS_IS_STAFF:
+            user.is_staff = staff_flag
+        elif staff_groups:
+            logger.debug(
+                "REMOTE_AUTH_STAFF_GROUPS configured but ignored because User model has no is_staff field."
+            )
+
+        if USER_HAS_IS_ACTIVE:
+            user.is_active = True
 
         self._apply_profile_attributes(user, attrs)
 
