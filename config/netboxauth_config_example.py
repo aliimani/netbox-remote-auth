@@ -23,7 +23,7 @@ REMOTE_AUTH_DEFAULT_GROUPS = ["netbox-staff"]   #update the group name if it is 
 
 # Admin group mappings
 REMOTE_AUTH_SUPERUSER_GROUPS = ["netbox-admin"] #update the group name if it is required
-REMOTE_AUTH_STAFF_GROUPS = ["netbox-staff"]     #update the group name if it is required
+REMOTE_AUTH_STAFF_GROUPS = ["netbox-staff"]     # NetBox >=4.5: ignored because User has no is_staff
 
 # OPTIONAL: map AAA attributes → NetBox profile fields
 REMOTE_AUTH_USER_FIRST_NAME = "givenName"
