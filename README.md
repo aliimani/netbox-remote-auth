@@ -33,7 +33,7 @@ Unlike NetBox’s built‑in `RemoteUserBackend`, this backend communicates **di
 5. Backend:
    - Creates/updates NetBox local users,
    - Assigns NetBox groups based on AAA roles,
-   - Applies staff/superuser flags,
+   - Applies superuser flag (and staff flag only on NetBox versions that still expose `is_staff`),
    - Ensures `is_active = True`,
    - Optionally updates first name, last name, and email.
 
@@ -182,7 +182,7 @@ REMOTE_AUTH_DEFAULT_GROUPS = ["netbox-staff"]
 REMOTE_AUTH_GROUP_SYNC_ENABLED = True
 
 REMOTE_AUTH_SUPERUSER_GROUPS = ["netbox-admin"]
-REMOTE_AUTH_STAFF_GROUPS = ["netbox-staff"]
+REMOTE_AUTH_STAFF_GROUPS = ["netbox-staff"]  # NetBox >=4.5: ignored (no is_staff field)
 
 NETBOX_REMOTE_AUTH_METHOD = "tacacs"  # or "radius"
 
@@ -271,7 +271,7 @@ Supported patterns:
 - `role = netbox-admin`
 - `Cisco-AVPair = shell:role="netbox-admin"`
 
-✅ Multiple groups example (TACACS+):
+Multiple groups example (TACACS+):
 - `role = netbox-admin`
 - `role = netbox-ipam-admin`
 
@@ -288,13 +288,13 @@ Supported patterns:
 - `Cisco-AVPair = shell:role="netbox-admin"` 
 - `Class = netbox-admin`
 
-✅ Multiple groups example (RADIUS / Cisco ISE):
+Multiple groups example (RADIUS / Cisco ISE):
 - `Class = netbox-admin`
 - `Class = netbox-staff`
 
    User is assigned to **both** NetBox groups: `netbox-admin`, `netbox-staff`
 
-⚠️ Cisco ISE note:
+Cisco ISE note:
 Cisco ISE may also inject an internal session value like:
 - `Class = CACS:<session-id>`
 
@@ -309,7 +309,7 @@ The backend should **ignore** these `CACS:` values to prevent NetBox from creati
 1. Add default groups  
 2. Add AAA role-based groups  
 3. If sync enabled → clear old groups  
-4. Apply staff/superuser group mapping  
+4. Apply superuser group mapping (and staff mapping only if `is_staff` exists)  
 
 ---
 
@@ -342,6 +342,7 @@ print("REMOTE_AUTH_ENABLED:", settings.REMOTE_AUTH_ENABLED)
 print("REMOTE_AUTH_SUPERUSER_GROUPS:", getattr(settings, "REMOTE_AUTH_SUPERUSER_GROUPS", None))
 print("REMOTE_AUTH_STAFF_GROUPS:", getattr(settings, "REMOTE_AUTH_STAFF_GROUPS", None))
 ```
+Note: NetBox 4.5+ user models do not provide `is_staff`; `REMOTE_AUTH_STAFF_GROUPS` is therefore informational only on those versions.
 
 If these values are not what you expect, the issue is in your NetBox/Docker config (e.g. wrong config file, bad mount).
 
